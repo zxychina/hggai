@@ -64,6 +64,7 @@ type Downloader struct {
 	sorani                *soraniAPIClient
 	dsdCatalog            dsdCatalogState
 	diagnostics           *diagnosticLog
+	dns                   *dnsResolver
 	apiMu                 sync.Mutex
 	apiBase               string
 	apiFailures           map[string]time.Time
@@ -271,14 +272,15 @@ func newNativeEngine(directory string) (*nativeEngine, error) {
 	cfg := defaultConfig()
 	cfg.dataDir = directory
 	router := &proxyRouter{}
-	d := &Downloader{cfg: cfg, providerHosts: map[string]string{}, proxyRouter: router,
-		limiter: newRequestLimiter(3, 250*time.Millisecond), diagnostics: newDiagnosticLog(directory)}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	transport.MaxIdleConnsPerHost = 8
 	transport.ResponseHeaderTimeout = 20 * time.Second
 	transport.Proxy = router.proxy
-	cdn := newCDNTransport(transport, newDNSResolver(transport))
+	resolver := newDNSResolver(transport)
+	d := &Downloader{cfg: cfg, providerHosts: map[string]string{}, proxyRouter: router,
+		dns: resolver, limiter: newRequestLimiter(3, 250*time.Millisecond), diagnostics: newDiagnosticLog(directory)}
+	cdn := newCDNTransport(transport, resolver)
 	d.client = &http.Client{Transport: newHuangguoBrowserTransport(newHongguoPlaybackTransport(cdn, transport), d), Timeout: 45 * time.Second,
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
