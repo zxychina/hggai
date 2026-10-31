@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -52,7 +54,7 @@ func TestHongguoFailedRegistrationBlocksAppRequestAndCanRetry(t *testing.T) {
 	d := sourceFixtureDownloader(t, func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/service/2/device_register/" {
 			registrations++
-			if registrations == 1 {
+			if registrations <= 3 {
 				return sourceFixtureResponse(r, 200, `{"device_id":0,"install_id":0}`), nil
 			}
 			return sourceFixtureResponse(r, 200, `{"device_id":"12345","install_id":"23456"}`), nil
@@ -65,7 +67,7 @@ func TestHongguoFailedRegistrationBlocksAppRequestAndCanRetry(t *testing.T) {
 		t.Fatal("unregistered request escaped startup gate")
 	}
 	_, err = d.hongguoAppRequest(context.Background(), http.MethodPost, hongguoSearchAppPath, nil, nil)
-	if err != nil || requests != 1 || registrations != 2 {
+	if err != nil || requests != 1 || registrations != 4 {
 		t.Fatalf("registration retry did not recover: %v", err)
 	}
 }
@@ -112,5 +114,38 @@ func TestHongguoRegistrationSaveFailureBlocksAndRetriesWithoutReregistering(t *t
 	}
 	if registrations != 1 {
 		t.Fatal("storage retry registered a second device")
+	}
+}
+
+func TestHongguoRegistrationRetriesTransientNetworkFailure(t *testing.T) {
+	registrations := 0
+	d := sourceFixtureDownloader(t, func(r *http.Request) (*http.Response, error) {
+		registrations++
+		if registrations < 3 {
+			return nil, &net.DNSError{Err: "no such host", Name: hongguoDeviceRegisterHost, IsNotFound: true}
+		}
+		return sourceFixtureResponse(r, 200, `{"device_id_str":"1234567890123456","install_id_str":"1234567890123457"}`), nil
+	}, false)
+	identity, err := d.ensureHongguoDeviceIdentity(context.Background())
+	if err != nil || !identity.valid() {
+		t.Fatalf("transient registration failure was not retried: %v", err)
+	}
+	if registrations != 3 {
+		t.Fatalf("unexpected registration attempts: %d", registrations)
+	}
+}
+
+func TestHongguoRegistrationReportsBlockedDNS(t *testing.T) {
+	registrations := 0
+	d := sourceFixtureDownloader(t, func(r *http.Request) (*http.Response, error) {
+		registrations++
+		return nil, &net.DNSError{Err: "no such host", Name: hongguoDeviceRegisterHost, IsNotFound: true}
+	}, false)
+	_, err := d.ensureHongguoDeviceIdentity(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "私人 DNS") {
+		t.Fatalf("blocked DNS was not reported with a usable hint: %v", err)
+	}
+	if registrations != hongguoDeviceRegisterAttempts {
+		t.Fatalf("unexpected registration attempts: %d", registrations)
 	}
 }
